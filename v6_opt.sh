@@ -93,15 +93,36 @@ print_progress_bar() {
 }
 
 start_time=$(date +%s)
-# 保存当前终端设置，避免 read/backspace 兼容性问题导致脚本退出后终端状态异常
-OLD_STTY=$(stty -g 2>/dev/null || true)
+
+# 保存/恢复当前终端设置。
+# 关键点：统一从 /dev/tty 读用户输入，避免用 curl | bash 运行时，read 从管道读而不是从键盘读。
+HAVE_TTY=0
+OLD_STTY=""
+if [ -r /dev/tty ] && [ -w /dev/tty ]; then
+    HAVE_TTY=1
+    OLD_STTY=$(stty -g < /dev/tty 2>/dev/null || true)
+fi
+
 restore_terminal_and_cleanup() {
-    if [ -n "${OLD_STTY:-}" ]; then
-        stty "$OLD_STTY" 2>/dev/null || true
+    if [ "$HAVE_TTY" -eq 1 ] && [ -n "${OLD_STTY:-}" ]; then
+        stty "$OLD_STTY" < /dev/tty 2>/dev/null || true
     fi
     cleanup
 }
 trap restore_terminal_and_cleanup EXIT
+
+prompt_read() {
+    local prompt="$1"
+    local __var="$2"
+
+    if [ "$HAVE_TTY" -eq 1 ]; then
+        printf "%s" "$prompt" > /dev/tty
+        IFS= read -r "$__var" < /dev/tty
+    else
+        # 非交互环境兜底
+        read -r -p "$prompt" "$__var"
+    fi
+}
 
 # ---------- 获取默认 IPv6 网卡与前缀 ----------
 interface_name=$(ip -6 route | grep default | grep -Po '(?<=dev )(\S+)' | head -1)
@@ -123,13 +144,13 @@ echo "网卡当前配置的IPv6： $current_ipv6"
 echo "分配该虚拟机的IPv6： $current_prefix::/64"
 echo ""
 
-read -r -p "请输入你要检测的对端IPv6: " target_ipv6
+prompt_read "请输入你要检测的对端IPv6: " target_ipv6
 if ! [[ "$target_ipv6" =~ ^([0-9a-fA-F:]+)$ && "${#target_ipv6}" -ge 15 && "${#target_ipv6}" -le 39 ]]; then
     echo "你输入的这个地址看着不太对。"
     exit 1
 fi
 
-read -r -p "请输入你要测试多少个IPv6（建议512M机型小于500个）: " ipv6_num
+prompt_read "请输入你要测试多少个IPv6（建议512M机型小于500个）: " ipv6_num
 if ! [[ "$ipv6_num" =~ ^[0-9]+$ ]]; then
     echo "数量必须是数字。"
     exit 1
