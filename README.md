@@ -21,6 +21,5 @@ If you have a big IPv6 subnet, this script helps you find the fastest IP. It fin
 Download the script, make it runnable, and start it. Just copy and paste this:
 
 ```bash
-wget [https://raw.githubusercontent.com/GCCan/ipv6-optimizer/main/v6_opt.sh](https://raw.githubusercontent.com/GCCan/ipv6-optimizer/main/v6_opt.sh)
-chmod +x v6_opt.sh
+wget https://raw.githubusercontent.com/GCCan/ipv6-optimizer/main/v6_opt.sh
 sudo ./v6_opt.sh
