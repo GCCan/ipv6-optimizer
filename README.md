@@ -1,12 +1,12 @@
 # IPv6 Optimizer
 
-Do you have a big IPv6 subnet? Want to find the fastest IP? This script does exactly that. 
+Quickly test and rank random IPv6 addresses in your subnet to find the lowest ping. 
 
-It finds your real subnet size first, like /64, /80, or /112. Then, it tests random IPs to find the one with the lowest ping.
+If you have a big IPv6 subnet, this script helps you find the fastest IP. It finds your real subnet size first, like /64, /80, or /112. Then, it tests random IPs to find the best one.
 
 ### ✨ Features
 * **Smart Subnet Check:** It uses Python to find your exact subnet mask. 
-* **Quick Network Test:** It tests your main IP first. If your network is down, it tells you right away so you don't waste time.
+* **Quick Network Test:** It tests your main IP first. If your network is down, it tells you right away. 
 * **Really Fast:** It tests many IPs at the same time.
 * **Cleans Up:** It deletes all temporary test IPs when it finishes. Your server stays clean.
 
@@ -18,9 +18,9 @@ It finds your real subnet size first, like /64, /80, or /112. Then, it tests ran
 
 ### 🚀 How to Run It
 
-Download the script, make it runnable, and start it:
+Download the script, make it runnable, and start it. Just copy and paste this:
 
 ```bash
-wget [https://raw.githubusercontent.com/your-username/ipv6-optimizer/main/ipv6_pre.sh](https://raw.githubusercontent.com/your-username/ipv6-optimizer/main/v6_opt.sh)
+wget [https://raw.githubusercontent.com/GCCan/ipv6-optimizer/main/v6_opt.sh](https://raw.githubusercontent.com/GCCan/ipv6-optimizer/main/v6_opt.sh)
 chmod +x v6_opt.sh
 sudo ./v6_opt.sh
