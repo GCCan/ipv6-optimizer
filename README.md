@@ -1,23 +1,22 @@
 # IPv6 Optimizer
 
-Got a whole /64 IPv6 subnet but not sure which IP is the fastest? This script does the heavy lifting for you. 
+Got a massive `/64` IPv6 subnet but not sure which specific IP gives you the lowest latency? This script does the heavy lifting for you.
 
-It randomly picks IPs from your subnet, pings your target address, and ranks the top 10 fastest ones. Think of it like picking the best apples from a huge basket. 
+It automatically generates random IPv6 addresses within your subnet, tests their ping against a target of your choice, and ranks the top 10 fastest ones. 
 
-### Why use this?
-* **It's fast.** It tests many IPs at the same time. 
-* **It's clean.** The script cleans up after itself. It removes all the temporary test IPs when it finishes, keeping your network card tidy.
-* **It's visual.** You get a nice progress bar to see how things are going.
+## ✨ Features
+* **Smart Pre-flight Check:** It pings the target with your main IP first to ensure the network is actually connected before doing the hard work.
+* **Fast & Concurrent:** Pings multiple IPs at the same time to get results quickly.
+* **Auto Cleanup:** It completely cleans up after itself. All temporary IPs are automatically removed from your network interface once the script finishes or if you cancel it early.
+* **Clean UI:** Includes a smooth terminal progress bar.
 
-### What you need
-* A Linux server with a working IPv6 network.
-* Root access (or a user with `sudo` rights).
-* `ping` or `ping6` installed.
+## 🚀 How to Use
 
-### How to run it
-Just download the script, make it executable, and run it. The script will ask you for the target IP and how many IPs you want to test.
+1. Download the script to your server.
+2. Make it executable.
+3. Run it!
 
 ```bash
-wget [https://raw.githubusercontent.com/your-username/your-repo/main/ipv6_pre.sh](https://raw.githubusercontent.com/your-username/your-repo/main/ipv6_pre.sh)
+wget [https://raw.githubusercontent.com/your-username/ipv6-optimizer/main/ipv6_pre.sh](https://raw.githubusercontent.com/your-username/ipv6-optimizer/main/ipv6_pre.sh)
 chmod +x ipv6_pre.sh
 sudo ./ipv6_pre.sh
