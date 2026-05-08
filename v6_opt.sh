@@ -8,12 +8,7 @@ if command -v sudo >/dev/null 2>&1; then
 fi
 
 if [ "$(id -u)" -ne 0 ] && [ -z "$SUDO" ]; then
-  echo "错误：当前不是 root。请用 root 运行，或者装个 sudo。"
-  exit 1
-fi
-
-if ! command -v python3 >/dev/null 2>&1; then
-  echo "错误：没找到 python3。脚本需要它来精准拆解 IPv6 地址，请先安装。"
+  echo "Error: Not running as root. Please install sudo or switch to root."
   exit 1
 fi
 
@@ -26,7 +21,7 @@ elif command -v ping >/dev/null 2>&1; then
   PING_CMD="ping"
   PING_MODE="ping-6"
 else
-  echo "错误：没找到 ping 命令。"
+  echo "Error: ping/ping6 not found."
   exit 1
 fi
 
@@ -61,10 +56,10 @@ ping_ipv6() {
 
 cleanup() {
     stty sane 2>/dev/null
-    echo -e "\n正在清理测试用的临时 IPv6 地址，马上就好..."
+    echo -e "\nCleaning up temporary IPv6 addresses..."
     if [ "${#ip_array[@]}" -gt 0 ]; then
         for src_ip in "${ip_array[@]}"; do
-            $SUDO ip -6 addr del "$src_ip/$prefix_len" dev "$interface_name" 2>/dev/null || true
+            $SUDO ip -6 addr del "$src_ip"/64 dev "$interface_name" 2>/dev/null || true
         done
     fi
     rm -f "${temp_file:-}" "${temp_progress_file:-}" "${err_file:-}" 2>/dev/null
@@ -80,89 +75,53 @@ print_progress_bar() {
     echo -ne "\r[${bars}${spaces}] ${percent}% ($current/$total)"
 }
 
-# ---------- 初始化与网段识别 ----------
+# ---------- 初始化 ----------
 start_time=$(date +%s)
 declare -a ip_array=()
 trap cleanup EXIT
 
 interface_name=$(ip -6 route | grep default | grep -Po '(?<=dev )(\S+)' | head -1)
 if [ -z "${interface_name:-}" ]; then
-    echo "错误：没找到默认的 IPv6 网卡。"
+    echo "Error: No default IPv6 route found."
     exit 1
 fi
 
-# 抓取完整的 IPv6 信息（带掩码）
-full_ipv6_info=$(ip -6 addr show "$interface_name" | grep 'inet6 ' | grep -v 'fe80' | awk '{print $2}' | head -n 1)
-if [ -z "${full_ipv6_info:-}" ]; then
-    echo "错误：网卡 $interface_name 上没找到公网 IPv6 地址。"
+current_ipv6=$(ip -6 addr show "$interface_name" | grep 'inet6' | grep -v 'fe80' | awk '{print $2}' | cut -d'/' -f1 | head -n 1)
+if [ -z "${current_ipv6:-}" ]; then
+    echo "Error: No global IPv6 address found on $interface_name."
     exit 1
 fi
 
-current_ipv6=$(echo "$full_ipv6_info" | cut -d'/' -f1)
-prefix_len=$(echo "$full_ipv6_info" | cut -d'/' -f2)
-
-# 兜底处理：如果获取不到掩码，或者掩码太小，统一按 /64 算
-if [ -z "$prefix_len" ] || [ "$prefix_len" -lt 64 ]; then
-    prefix_len=64
-fi
-
-if [ "$prefix_len" -ge 128 ]; then
-    echo "你的 IPv6 是 /128 掩码，只有一个 IP，没法变出花来随机生成。"
-    exit 1
-fi
-
-# 算出需要补充几个随机块 (每块16位)
-random_blocks=$(( (128 - prefix_len) / 16 ))
-if [ "$random_blocks" -lt 1 ] || [ $((prefix_len % 16)) -ne 0 ]; then
-    echo "目前只支持 /64, /80, /96, /112 这类标准的掩码。你的掩码是 /$prefix_len，脚本搞不定。"
-    exit 1
-fi
-
-# 借助 python3 把地址完全展开，提取固定的前缀部分
-fixed_blocks=$(( prefix_len / 16 ))
-base_prefix=$(python3 -c "
-import ipaddress
-try:
-    ip = ipaddress.IPv6Address('$current_ipv6').exploded
-    blocks = ip.split(':')
-    print(':'.join(blocks[:$fixed_blocks]))
-except Exception:
-    print('')
-" 2>/dev/null)
-
-if [ -z "$base_prefix" ]; then
-    echo "解析 IPv6 前缀失败了。这串 IP 看着不对劲。"
-    exit 1
-fi
+current_prefix=$(echo "$current_ipv6" | cut -d':' -f1-4)
 
 echo "========================================="
-echo "当前 IP:  $current_ipv6"
-echo "真实掩码: /$prefix_len"
-echo "固定前缀: $base_prefix"
+echo "Current IPv6: $current_ipv6"
+echo "Subnet:       $current_prefix::/64"
 echo "========================================="
 echo ""
 
-read -p "请输入你要检测的对端 IPv6: " target_ipv6
+read -p "Enter the target IPv6 address to test: " target_ipv6
 if ! [[ "$target_ipv6" =~ ^([0-9a-fA-F:]+)$ && "${#target_ipv6}" -ge 15 ]]; then
-    echo "地址格式好像填错了。"
+    echo "Invalid IPv6 address format."
     exit 1
 fi
 
-echo "正在用主 IP 试探目标..."
+# 预检功能：测试目标是否可达
+echo "Running pre-flight check..."
 if ! $PING_CMD -c 2 "$target_ipv6" >/dev/null 2>&1; then
-    echo -e "\n警告：你的主 IPv6 根本 ping 不通目标地址。"
-    read -p "网络可能不通，还要强行继续测吗？(y/n): " force_continue
+    echo -e "\nWarning: The target IP seems unreachable from your current main IPv6."
+    read -p "Do you want to continue anyway? (y/n): " force_continue
     if [[ "$force_continue" != "y" && "$force_continue" != "Y" ]]; then
         exit 1
     fi
 else
-    echo "试探成功，目标网络可达。"
+    echo "Pre-flight check passed. Target is reachable."
 fi
 echo ""
 
-read -p "想生成多少个随机 IP 来测？(例如 100): " ipv6_num
+read -p "How many IPs do you want to generate and test? (e.g., 100): " ipv6_num
 if ! [[ "$ipv6_num" =~ ^[0-9]+$ ]] || [ "$ipv6_num" -eq 0 ]; then
-    echo "数量得填个正整数。"
+    echo "Invalid number."
     exit 1
 fi
 
@@ -170,7 +129,7 @@ declare -A used_ip_addrs
 used_ip_addrs["$current_ipv6"]=1
 
 # ---------- 生成 IP ----------
-echo "正在 /$prefix_len 网段里生成 $ipv6_num 个随机 IP..."
+echo "Generating $ipv6_num IPs in $current_prefix::/64..."
 current_count=0
 err_file=$(mktemp)
 max_tries=$((ipv6_num * 10))
@@ -181,26 +140,15 @@ for (( i=0; i<ipv6_num; i++ )); do
     while : ; do
         ((tries++))
         if [ "$tries" -gt "$max_tries" ]; then
-            echo -e "\n错误：生成失败太多次了。你的云厂商估计限制了网卡绑定的 IP 数量。"
+            echo -e "\nError: Max retries reached. Check if your provider allows adding multiple IPs."
             exit 1
         fi
 
-        # 动态生成所需数量的随机块
-        random_part=""
-        for ((j=0; j<random_blocks; j++)); do
-            part=$(printf "%x" $((RANDOM%65536)))
-            if [ $j -eq 0 ]; then
-                random_part="$part"
-            else
-                random_part="$random_part:$part"
-            fi
-        done
-        
-        test_ipv6="$base_prefix:$random_part"
+        random_part=$(printf '%x:%x:%x:%x' $((RANDOM%65536)) $((RANDOM%65536)) $((RANDOM%65536)) $((RANDOM%65536)))
+        test_ipv6="$current_prefix:$random_part"
 
         if [ -z "${used_ip_addrs[$test_ipv6]+x}" ]; then
-            # 注意这里绑定的掩码变成了动态的 $prefix_len
-            if $SUDO ip -6 addr add "$test_ipv6/$prefix_len" dev "$interface_name" 2>>"$err_file"; then
+            if $SUDO ip -6 addr add "$test_ipv6"/64 dev "$interface_name" 2>>"$err_file"; then
                 used_ip_addrs["$test_ipv6"]=1
                 ip_array+=("$test_ipv6")
                 ((current_count++))
@@ -209,7 +157,7 @@ for (( i=0; i<ipv6_num; i++ )); do
             else
                 if [ "$first_err_printed" -eq 0 ]; then
                     first_err_printed=1
-                    echo -e "\n提示：添加 IP 被拒绝了，正在自动重试..."
+                    echo -e "\nTip: Failed to add IP, retrying automatically..."
                 fi
                 continue
             fi
@@ -217,7 +165,7 @@ for (( i=0; i<ipv6_num; i++ )); do
     done
 done
 
-echo -e "\n\n开始对这 ${#ip_array[@]} 个 IP 测延迟了，稍等..."
+echo -e "\n\nTesting ping latency for ${#ip_array[@]} addresses..."
 temp_file=$(mktemp)
 temp_progress_file=$(mktemp)
 
@@ -236,10 +184,12 @@ for src_ip in "${ip_array[@]}"; do
         echo >> "$temp_progress_file"
     ) &
 
+    # 控制并发数量
     while (( $(jobs -p | wc -l) >= parallel_jobs )); do
         sleep 0.1
     done
 
+    # 动态更新进度
     completed_jobs=$(wc -l < "$temp_progress_file")
     print_progress_bar "$completed_jobs" "$total_jobs"
 done
@@ -260,9 +210,9 @@ if [ -s "$temp_file" ]; then
         printf "%-40s %s ms\n" "$ipv6" "$rtt"
     done
 else
-    echo "全部阵亡，没一个能 ping 通的。"
+    echo "No successful pings recorded. All tested IPs failed."
 fi
 echo "====================================================="
 
 elapsed_time=$(( $(date +%s) - start_time ))
-echo "搞定！总共花了 $elapsed_time 秒。"
+echo "Done! Total time: $elapsed_time seconds."
