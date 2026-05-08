@@ -1,20 +1,24 @@
 # IPv6 Optimizer
 
-Got a massive `/64` IPv6 subnet but not sure which specific IP gives you the lowest latency? This script does the heavy lifting for you.
+Do you have a big IPv6 subnet? Want to find the fastest IP? This script does exactly that. 
 
-It automatically generates random IPv6 addresses within your subnet, tests their ping against a target of your choice, and ranks the top 10 fastest ones. 
+It finds your real subnet size first, like /64, /80, or /112. Then, it tests random IPs to find the one with the lowest ping.
 
-## ✨ Features
-* **Smart Pre-flight Check:** It pings the target with your main IP first to ensure the network is actually connected before doing the hard work.
-* **Fast & Concurrent:** Pings multiple IPs at the same time to get results quickly.
-* **Auto Cleanup:** It completely cleans up after itself. All temporary IPs are automatically removed from your network interface once the script finishes or if you cancel it early.
-* **Clean UI:** Includes a smooth terminal progress bar.
+### ✨ Features
+* **Smart Subnet Check:** It uses Python to find your exact subnet mask. 
+* **Quick Network Test:** It tests your main IP first. If your network is down, it tells you right away so you don't waste time.
+* **Really Fast:** It tests many IPs at the same time.
+* **Cleans Up:** It deletes all temporary test IPs when it finishes. Your server stays clean.
 
-## 🚀 How to Use
+### 🛠️ What You Need
+* A Linux server with IPv6.
+* Root access (or `sudo`).
+* `python3` (to read the IP correctly).
+* `ping` or `ping6`.
 
-1. Download the script to your server.
-2. Make it executable.
-3. Run it!
+### 🚀 How to Run It
+
+Download the script, make it runnable, and start it:
 
 ```bash
 wget [https://raw.githubusercontent.com/your-username/ipv6-optimizer/main/ipv6_pre.sh](https://raw.githubusercontent.com/your-username/ipv6-optimizer/main/ipv6_pre.sh)
