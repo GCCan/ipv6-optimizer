@@ -21,6 +21,6 @@ It finds your real subnet size first, like /64, /80, or /112. Then, it tests ran
 Download the script, make it runnable, and start it:
 
 ```bash
-wget [https://raw.githubusercontent.com/your-username/ipv6-optimizer/main/ipv6_pre.sh](https://raw.githubusercontent.com/your-username/ipv6-optimizer/main/ipv6_pre.sh)
-chmod +x ipv6_pre.sh
-sudo ./ipv6_pre.sh
+wget [https://raw.githubusercontent.com/your-username/ipv6-optimizer/main/ipv6_pre.sh](https://raw.githubusercontent.com/your-username/ipv6-optimizer/main/v6_opt.sh)
+chmod +x v6_opt.sh
+sudo ./v6_opt.sh
