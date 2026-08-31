@@ -1,4 +1,3 @@
-```markdown
 # IPv6 Subnet Latency Optimizer
 
 用于在 Linux VPS 的 `/64` IPv6 子网中批量探测、并发筛选出与目标服务器双向延迟最低的最优 IPv6 地址。
@@ -29,8 +28,6 @@
 
    # 2. 将公钥推送至目标机器
    ssh-copy-id -p <SSH端口> <用户名>@<目标IPv6>
-
-```
 
 ---
 
