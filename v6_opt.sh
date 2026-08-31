@@ -1,506 +1,139 @@
 #!/bin/bash
-set -u
 
-# ---------- 权限与命令可用性检查 ----------
-SUDO=""
-if command -v sudo >/dev/null 2>&1; then
-  SUDO="sudo"
+target_ip="${1}"
+ssh_user="${2:-root}"
+ssh_port="${3:-22}"
+threads="${4:-4}" # 推荐并发设为 4，避免触发目标服务器 sshd 频控
+
+if [ -z "$target_ip" ]; then
+    echo "用法: $0 <目标IPv6> [SSH用户名] [SSH端口] [并发线程数]"
+    echo "示例: $0 2402:4e00:c011:2700:9cb6:df2a:9aa0:1 root 22 4"
+    exit 1
 fi
 
-if [ "$(id -u)" -ne 0 ] && [ -z "$SUDO" ]; then
-  echo "错误：当前不是 root，且系统未安装 sudo。"
-  echo "解决：要么切换 root 运行；要么安装 sudo（Debian/Ubuntu: apt update && apt install -y sudo）。"
-  exit 1
+read -r -p "请输入要测试的 IPv6 数量 (1-65535，默认 100): " test_count
+test_count="${test_count:-100}"
+
+if ! [[ "$test_count" =~ ^[0-9]+$ ]] || [ "$test_count" -lt 1 ] || [ "$test_count" -gt 65535 ]; then
+    echo "输入无效，已重置为默认值 100"
+    test_count=100
 fi
 
-# 选择 ping 命令（优先 ping6；没有则用 ping -6）
-PING_CMD=""
-PING_MODE=""
-if command -v ping6 >/dev/null 2>&1; then
-  PING_CMD="ping6"
-  PING_MODE="ping6"
-elif command -v ping >/dev/null 2>&1; then
-  PING_CMD="ping"
-  PING_MODE="ping-6"
+# 1. 自动检测网卡与 /64 前缀
+interface=$(ip -6 route show default 2>/dev/null | awk '/dev/ {for(i=1;i<=NF;i++) if($i=="dev") print $(i+1); exit}')
+[ -z "$interface" ] && interface="eth0"
+
+ipv6_prefix=$(ip -6 route show dev "$interface" 2>/dev/null | awk '/\/64/ && !/default/ {print $1}' | head -n 1)
+ipv6_base="${ipv6_prefix%/*}"
+
+if [ -z "$ipv6_base" ]; then
+    raw_ip=$(ip -6 addr show dev "$interface" scope global 2>/dev/null | awk '/inet6/ {print $2}' | cut -d/ -f1 | head -n 1)
+    ipv6_base=$(echo "$raw_ip" | awk -F: '{print $1":"$2":"$3":"$4"::"}')
+fi
+
+[[ "$ipv6_base" != *"::" ]] && ipv6_base="${ipv6_base}::"
+
+echo "=========================================="
+echo "网卡: $interface | 前缀: $ipv6_base"
+echo "目标: $target_ip | 并发: $threads | 测试数: $test_count"
+echo "=========================================="
+
+subnet_mask="/64"
+output_file="ping_${target_ip//:/_}.csv"
+echo "IPv6 Address,Local to Target(ms),Target to Local(ms)" > "$output_file"
+
+# 2. 创建并发令牌桶
+fifo_file="/tmp/$$.fifo"
+mkfifo "$fifo_file"
+exec 6<>"$fifo_file"
+rm -f "$fifo_file"
+
+for ((j=0; j<threads; j++)); do
+    echo >&6
+done
+
+# 3. 退出清理
+cleanup() {
+    trap - SIGINT SIGTERM EXIT
+    echo -e "\n正在终止并清理资源..."
+    exec 6>&- 2>/dev/null
+    exec 6<&- 2>/dev/null
+    kill $(jobs -p) 2>/dev/null
+    rm -f "${output_file}.lock"
+    exit 1
+}
+trap cleanup SIGINT SIGTERM
+
+# 4. 单 IP 执行逻辑
+do_ping() {
+    local hex_suffix="$1"
+    local ipv6_addr="${ipv6_base}${hex_suffix}"
+
+    ip -6 addr add "${ipv6_addr}${subnet_mask}" dev "$interface" nodad 2>/dev/null
+
+    # 本地 Ping 目标
+    ping_local=$(timeout 1.5 ping -6 -I "$ipv6_addr" -c 2 -i 0.1 -W 1 "$target_ip" 2>/dev/null)
+    min_delay_local=$(echo "$ping_local" | awk -F'/' '/rtt|min\/avg\/max/{print $4}' | awk '{print $NF}')
+    [ -z "$min_delay_local" ] && min_delay_local="TIMEOUT"
+
+    # 独立 SSH Ping（带快速断开与保活限制）
+    ping_ssh=$(timeout 2.5 ssh -o BatchMode=yes \
+                            -o ConnectTimeout=2 \
+                            -o ServerAliveInterval=1 \
+                            -o ServerAliveCountMax=1 \
+                            -o StrictHostKeyChecking=no \
+                            -p "$ssh_port" "$ssh_user@$target_ip" "ping -6 -c 2 -i 0.1 -W 1 $ipv6_addr" 2>/dev/null)
+    min_delay_ssh=$(echo "$ping_ssh" | awk -F'/' '/rtt|min\/avg\/max/{print $4}' | awk '{print $NF}')
+    [ -z "$min_delay_ssh" ] && min_delay_ssh="TIMEOUT"
+
+    result="$ipv6_addr,$min_delay_local,$min_delay_ssh"
+    echo "$result"
+
+    (
+        flock -x 200
+        echo "$result" >> "$output_file"
+    ) 200>"${output_file}.lock"
+
+    ip -6 addr del "${ipv6_addr}${subnet_mask}" dev "$interface" 2>/dev/null
+}
+
+# 导出函数供 subshell 调用
+export -f do_ping
+export ipv6_base subnet_mask interface target_ip ssh_port ssh_user output_file
+
+# 5. 分发并发任务（增加外层 5 秒硬超时，死锁直接强杀）
+for i in $(seq 1 "$test_count"); do
+    read -u6
+    {
+        trap - SIGINT SIGTERM
+        hex_suffix=$(printf '%x' $i)
+        # 整体任务加装 5 秒超时保护
+        timeout 5 bash -c "do_ping '$hex_suffix'" 2>/dev/null
+        # 无论发生什么，必释放令牌
+        echo >&6
+    } &
+done
+
+wait
+
+# 清理资源
+trap - SIGINT SIGTERM EXIT
+exec 6>&- 2>/dev/null
+exec 6<&- 2>/dev/null
+rm -f "${output_file}.lock"
+
+# 6. 提取并展示最快的 5 个 IP
+echo -e "\n================ 最快的 5 个 IPv6 ================"
+valid_results=$(grep -v "TIMEOUT" "$output_file" | tail -n +2 | sort -t',' -k2,2n | head -n 5)
+
+if [ -z "$valid_results" ]; then
+    echo "未找到有效响应的 IP（所有测试均超时）。"
 else
-  echo "错误：未找到 ping6 或 ping 命令。请安装 iputils-ping。"
-  exit 1
-fi
-
-ping_ipv6() {
-    local src_ip="$1"
-    local target_ipv6="$2"
-    local temp_file="$3"
-
-    local ping_output
-
-    if [ "$PING_MODE" = "ping6" ]; then
-      ping_output=$($PING_CMD -I "$src_ip" -i 0.3 -c 30 "$target_ipv6" 2>&1)
-      # 回退：部分实现 -I 不能接源地址
-      if echo "$ping_output" | grep -qiE 'invalid argument|unknown|bind|Cannot assign requested address|bad address|cannot assign|Usage:'; then
-          ping_output=$($PING_CMD -I "$interface_name" -S "$src_ip" -i 0.3 -c 30 "$target_ipv6" 2>&1)
-      fi
-    else
-      # ping -6
-      ping_output=$($PING_CMD -6 -I "$src_ip" -i 0.3 -c 30 "$target_ipv6" 2>&1)
-      if echo "$ping_output" | grep -qiE 'invalid argument|unknown|bind|Cannot assign requested address|bad address|cannot assign|Usage:'; then
-          ping_output=$($PING_CMD -6 -I "$interface_name" -S "$src_ip" -i 0.3 -c 30 "$target_ipv6" 2>&1)
-      fi
-    fi
-
-    local loss
-    loss=$(echo "$ping_output" | grep 'packets transmitted' | awk '{print $6}')
-
-    # 无有效统计则跳过
-    if [ -z "${loss:-}" ]; then
-        return
-    fi
-
-    # 100% 丢包跳过
-    if [ "$loss" = "100%" ] || [ "$loss" = "100.0%" ]; then
-        return
-    fi
-
-    # 取 avg RTT
-    local avg
-    avg=$(echo "$ping_output" | awk -F'=' '/rtt|round-trip/ {print $2}' | awk -F'/' '{print $2}' | head -n 1)
-
-    [ -z "${avg:-}" ] && return
-    echo "$src_ip $avg" >> "$temp_file"
-}
-
-cleanup() {
-    if [ "${#ip_array[@]}" -gt 0 ]; then
-        for src_ip in "${ip_array[@]}"; do
-            $SUDO ip -6 addr del "$src_ip"/64 dev "$interface_name" 2>/dev/null || true
-        done
-    fi
-    [ -n "${temp_file:-}" ] && [ -f "$temp_file" ] && rm -f "$temp_file"
-    [ -n "${temp_progress_file:-}" ] && [ -f "$temp_progress_file" ] && rm -f "$temp_progress_file"
-    [ -n "${err_file:-}" ] && [ -f "$err_file" ] && rm -f "$err_file"
-}
-
-print_progress_bar() {
-    local -i current=$1
-    local -i total=$2
-    local filled=$((current*60/total))
-    local bars
-    bars=$(printf "%-${filled}s" "|" | tr ' ' '|')
-    local spaces
-    spaces=$(printf "%-$((60-filled))s" " ")
-    local percent=$((current*100/total))
-    echo -ne "[${bars}${spaces}] ${percent}% ($current/$total)\r"
-}
-
-start_time=$(date +%s)
-
-# 保存/恢复当前终端设置。
-# 关键点：统一从 /dev/tty 读用户输入，避免用 curl | bash 运行时，read 从管道读而不是从键盘读。
-HAVE_TTY=0
-OLD_STTY=""
-if [ -r /dev/tty ] && [ -w /dev/tty ]; then
-    HAVE_TTY=1
-    OLD_STTY=$(stty -g < /dev/tty 2>/dev/null || true)
-fi
-
-restore_terminal_and_cleanup() {
-    if [ "$HAVE_TTY" -eq 1 ] && [ -n "${OLD_STTY:-}" ]; then
-        stty "$OLD_STTY" < /dev/tty 2>/dev/null || true
-    fi
-    cleanup
-}
-trap restore_terminal_and_cleanup EXIT
-
-prompt_read() {
-    local prompt="$1"
-    local __var="$2"
-
-    if [ "$HAVE_TTY" -eq 1 ]; then
-        printf "%s" "$prompt" > /dev/tty
-        IFS= read -e -r "$__var" < /dev/tty
-    else
-        # 非交互环境兜底
-        read -r -p "$prompt" "$__var"
-    fi
-}
-
-# ---------- 获取默认 IPv6 网卡与前缀 ----------
-interface_name=$(ip -6 route | grep default | grep -Po '(?<=dev )(\S+)' | head -1)
-if [ -z "${interface_name:-}" ]; then
-    echo "未找到默认 IPv6 路由对应的网卡（ip -6 route default）。"
-    exit 1
-fi
-
-current_ipv6=$(ip -6 addr show "$interface_name" | grep 'inet6' | grep -v 'fe80' | awk '{print $2}' | cut -d'/' -f1 | head -n 1)
-if [ -z "${current_ipv6:-}" ]; then
-    echo "未在网卡 $interface_name 上找到全局 IPv6（非 fe80::/10）。"
-    exit 1
-fi
-
-current_prefix=$(echo "$current_ipv6" | cut -d':' -f1-4)
-
-echo ""
-echo "网卡当前配置的IPv6： $current_ipv6"
-echo "分配该虚拟机的IPv6： $current_prefix::/64"
-echo ""
-
-prompt_read "请输入你要检测的对端IPv6: " target_ipv6
-if ! [[ "$target_ipv6" =~ ^([0-9a-fA-F:]+)$ && "${#target_ipv6}" -ge 15 && "${#target_ipv6}" -le 39 ]]; then
-    echo "你输入的这个地址看着不太对。"
-    exit 1
-fi
-
-prompt_read "请输入你要测试多少个IPv6（建议512M机型小于500个）: " ipv6_num
-if ! [[ "$ipv6_num" =~ ^[0-9]+$ ]]; then
-    echo "数量必须是数字。"
-    exit 1
-fi
-if [ "$ipv6_num" -eq 0 ]; then
-    echo "数量不能为 0。"
-    exit 1
-fi
-
-declare -a ip_array
-declare -A used_ip_addrs
-used_ip_addrs["$current_ipv6"]=1
-
-echo ""
-echo "在 $current_prefix::/64 中生成$ipv6_num个IPv6进行检测 请等待任务完成"
-
-current_count=0
-err_file=$(mktemp)
-
-# 最大重试次数，避免无限卡死（可按需调大）
-max_tries=$((ipv6_num * 300))
-tries=0
-first_err_printed=0
-
-for (( i=0; i<ipv6_num; i++ )); do
-    while : ; do
-        ((tries++))
-        if [ "$tries" -gt "$max_tries" ]; then
-            echo ""
-            echo "错误：生成IPv6阶段连续失败，已超过最大重试次数（$max_tries）。"
-            echo "最近一次错误信息如下："
-            tail -n 1 "$err_file" 2>/dev/null || true
-            echo ""
-            echo "常见原因："
-            echo "1) 你的环境不允许在网卡上随意添加大量 IPv6（云厂商/安全策略限制）。"
-            echo "2) 该地址段并不是你真正可用的 /64（仅有单个地址或非 /64）。"
-            echo "3) 容器环境缺少 NET_ADMIN 能力。"
-            exit 1
-        fi
-
-        random_part=$(printf '%x:%x:%x:%x' $((RANDOM%65536)) $((RANDOM%65536)) $((RANDOM%65536)) $((RANDOM%65536)))
-        test_ipv6="$current_prefix:$random_part"
-
-        if [ -z "${used_ip_addrs[$test_ipv6]+x}" ]; then
-            # 关键：这里不再吞掉错误，而是记录下来，便于定位
-            if $SUDO ip -6 addr add "$test_ipv6"/64 dev "$interface_name" 2>>"$err_file"; then
-                used_ip_addrs["$test_ipv6"]=1
-                ip_array+=("$test_ipv6")
-                ((current_count++))
-                print_progress_bar "$current_count" "$ipv6_num"
-                break
-            else
-                # 第一次失败给一个明显提示（避免用户认为卡死）
-                if [ "$first_err_printed" -eq 0 ]; then
-                    first_err_printed=1
-                    echo ""
-                    echo "提示：添加IPv6失败，正在重试生成（已记录错误原因）。若持续失败将自动退出并打印原因。"
-                    echo -ne "\r"
-                fi
-                continue
-            fi
-        fi
+    printf "%-40s | %-16s | %-16s\n" "IPv6 地址" "去程延迟 (ms)" "回程延迟 (ms)"
+    echo "-----------------------------------------+------------------+------------------"
+    echo "$valid_results" | while IFS=',' read -r ip d1 d2; do
+        printf "%-40s | %-16s | %-16s\n" "$ip" "$d1" "$d2"
     done
-done
-
-echo ""
-sleep 2
-
-temp_file=$(mktemp)
-
-# 动态并发（至少 1，最多 200）
-total_jobs=${#ip_array[@]}
-quarter_jobs=$(( (total_jobs + 3) / 4 ))
-parallel_jobs=$quarter_jobs
-if [ "$parallel_jobs" -lt 1 ]; then parallel_jobs=1; fi
-if [ "$parallel_jobs" -gt 200 ]; then parallel_jobs=200; fi
-
-completed_jobs=0
-temp_progress_file=$(mktemp)
-
-echo
-echo "对$total_jobs个IPv6进行Ping测试中 请等待任务完成"
-print_progress_bar "$completed_jobs" "$total_jobs"
-
-{
-    for src_ip in "${ip_array[@]}"; do
-        (
-            ping_ipv6 "$src_ip" "$target_ipv6" "$temp_file"
-            # 只删一次，静默错误
-            $SUDO ip -6 addr del "$src_ip"/64 dev "$interface_name" 2>/dev/null || true
-            echo >> "$temp_progress_file"
-        ) &
-
-        if (( $(jobs | wc -l) >= parallel_jobs )); then
-            wait -n
-            completed_jobs=$(wc -l < "$temp_progress_file")
-            print_progress_bar "$completed_jobs" "$total_jobs"
-        fi
-    done
-    wait
-}
-
-completed_jobs=$(wc -l < "$temp_progress_file")
-print_progress_bar "$completed_jobs" "$total_jobs"
-echo ""
-
-echo "====================================================="
-echo "IPv6                                     Average"
-sort -k2 -n "$temp_file" | head -n 10 | while read -r line; do
-    ipv6=$(echo "$line" | awk '{print $1}')
-    rtt=$(echo "$line" | awk '{print $2}')
-    printf "%-40s %s ms\n" "$ipv6" "$rtt"
-done
-echo "====================================================="
-
-end_time=$(date +%s)
-elapsed_time=$((end_time - start_time))
-echo "脚本总耗时: $elapsed_time 秒。"
-    if [ "$PING_MODE" = "ping6" ]; then
-      ping_output=$($PING_CMD -I "$src_ip" -i 0.3 -c 30 "$target_ipv6" 2>&1)
-      # 回退：部分实现 -I 不能接源地址
-      if echo "$ping_output" | grep -qiE 'invalid argument|unknown|bind|Cannot assign requested address|bad address|cannot assign|Usage:'; then
-          ping_output=$($PING_CMD -I "$interface_name" -S "$src_ip" -i 0.3 -c 30 "$target_ipv6" 2>&1)
-      fi
-    else
-      # ping -6
-      ping_output=$($PING_CMD -6 -I "$src_ip" -i 0.3 -c 30 "$target_ipv6" 2>&1)
-      if echo "$ping_output" | grep -qiE 'invalid argument|unknown|bind|Cannot assign requested address|bad address|cannot assign|Usage:'; then
-          ping_output=$($PING_CMD -6 -I "$interface_name" -S "$src_ip" -i 0.3 -c 30 "$target_ipv6" 2>&1)
-      fi
-    fi
-
-    local loss
-    loss=$(echo "$ping_output" | grep 'packets transmitted' | awk '{print $6}')
-
-    # 无有效统计则跳过
-    if [ -z "${loss:-}" ]; then
-        return
-    fi
-
-    # 100% 丢包跳过
-    if [ "$loss" = "100%" ] || [ "$loss" = "100.0%" ]; then
-        return
-    fi
-
-    # 取 avg RTT
-    local avg
-    avg=$(echo "$ping_output" | awk -F'=' '/rtt|round-trip/ {print $2}' | awk -F'/' '{print $2}' | head -n 1)
-
-    [ -z "${avg:-}" ] && return
-    echo "$src_ip $avg" >> "$temp_file"
-}
-
-cleanup() {
-    if [ "${#ip_array[@]}" -gt 0 ]; then
-        for src_ip in "${ip_array[@]}"; do
-            $SUDO ip -6 addr del "$src_ip"/64 dev "$interface_name" 2>/dev/null || true
-        done
-    fi
-    [ -n "${temp_file:-}" ] && [ -f "$temp_file" ] && rm -f "$temp_file"
-    [ -n "${temp_progress_file:-}" ] && [ -f "$temp_progress_file" ] && rm -f "$temp_progress_file"
-    [ -n "${err_file:-}" ] && [ -f "$err_file" ] && rm -f "$err_file"
-}
-
-print_progress_bar() {
-    local -i current=$1
-    local -i total=$2
-    local filled=$((current*60/total))
-    local bars
-    bars=$(printf "%-${filled}s" "|" | tr ' ' '|')
-    local spaces
-    spaces=$(printf "%-$((60-filled))s" " ")
-    local percent=$((current*100/total))
-    echo -ne "[${bars}${spaces}] ${percent}% ($current/$total)\r"
-}
-
-start_time=$(date +%s)
-
-# 保存/恢复当前终端设置。
-# 关键点：统一从 /dev/tty 读用户输入，避免用 curl | bash 运行时，read 从管道读而不是从键盘读。
-HAVE_TTY=0
-OLD_STTY=""
-if [ -r /dev/tty ] && [ -w /dev/tty ]; then
-    HAVE_TTY=1
-    OLD_STTY=$(stty -g < /dev/tty 2>/dev/null || true)
 fi
-
-restore_terminal_and_cleanup() {
-    if [ "$HAVE_TTY" -eq 1 ] && [ -n "${OLD_STTY:-}" ]; then
-        stty "$OLD_STTY" < /dev/tty 2>/dev/null || true
-    fi
-    cleanup
-}
-trap restore_terminal_and_cleanup EXIT
-
-prompt_read() {
-    local prompt="$1"
-    local __var="$2"
-
-    if [ "$HAVE_TTY" -eq 1 ]; then
-        printf "%s" "$prompt" > /dev/tty
-        IFS= read -r "$__var" < /dev/tty
-    else
-        # 非交互环境兜底
-        read -r -p "$prompt" "$__var"
-    fi
-}
-
-# ---------- 获取默认 IPv6 网卡与前缀 ----------
-interface_name=$(ip -6 route | grep default | grep -Po '(?<=dev )(\S+)' | head -1)
-if [ -z "${interface_name:-}" ]; then
-    echo "未找到默认 IPv6 路由对应的网卡（ip -6 route default）。"
-    exit 1
-fi
-
-current_ipv6=$(ip -6 addr show "$interface_name" | grep 'inet6' | grep -v 'fe80' | awk '{print $2}' | cut -d'/' -f1 | head -n 1)
-if [ -z "${current_ipv6:-}" ]; then
-    echo "未在网卡 $interface_name 上找到全局 IPv6（非 fe80::/10）。"
-    exit 1
-fi
-
-current_prefix=$(echo "$current_ipv6" | cut -d':' -f1-4)
-
-echo ""
-echo "网卡当前配置的IPv6： $current_ipv6"
-echo "分配该虚拟机的IPv6： $current_prefix::/64"
-echo ""
-
-prompt_read "请输入你要检测的对端IPv6: " target_ipv6
-if ! [[ "$target_ipv6" =~ ^([0-9a-fA-F:]+)$ && "${#target_ipv6}" -ge 15 && "${#target_ipv6}" -le 39 ]]; then
-    echo "你输入的这个地址看着不太对。"
-    exit 1
-fi
-
-prompt_read "请输入你要测试多少个IPv6（建议512M机型小于500个）: " ipv6_num
-if ! [[ "$ipv6_num" =~ ^[0-9]+$ ]]; then
-    echo "数量必须是数字。"
-    exit 1
-fi
-if [ "$ipv6_num" -eq 0 ]; then
-    echo "数量不能为 0。"
-    exit 1
-fi
-
-declare -a ip_array
-declare -A used_ip_addrs
-used_ip_addrs["$current_ipv6"]=1
-
-echo ""
-echo "在 $current_prefix::/64 中生成$ipv6_num个IPv6进行检测 请等待任务完成"
-
-current_count=0
-err_file=$(mktemp)
-
-# 最大重试次数，避免无限卡死（可按需调大）
-max_tries=$((ipv6_num * 300))
-tries=0
-first_err_printed=0
-
-for (( i=0; i<ipv6_num; i++ )); do
-    while : ; do
-        ((tries++))
-        if [ "$tries" -gt "$max_tries" ]; then
-            echo ""
-            echo "错误：生成IPv6阶段连续失败，已超过最大重试次数（$max_tries）。"
-            echo "最近一次错误信息如下："
-            tail -n 1 "$err_file" 2>/dev/null || true
-            echo ""
-            echo "常见原因："
-            echo "1) 你的环境不允许在网卡上随意添加大量 IPv6（云厂商/安全策略限制）。"
-            echo "2) 该地址段并不是你真正可用的 /64（仅有单个地址或非 /64）。"
-            echo "3) 容器环境缺少 NET_ADMIN 能力。"
-            exit 1
-        fi
-
-        random_part=$(printf '%x:%x:%x:%x' $((RANDOM%65536)) $((RANDOM%65536)) $((RANDOM%65536)) $((RANDOM%65536)))
-        test_ipv6="$current_prefix:$random_part"
-
-        if [ -z "${used_ip_addrs[$test_ipv6]+x}" ]; then
-            # 关键：这里不再吞掉错误，而是记录下来，便于定位
-            if $SUDO ip -6 addr add "$test_ipv6"/64 dev "$interface_name" 2>>"$err_file"; then
-                used_ip_addrs["$test_ipv6"]=1
-                ip_array+=("$test_ipv6")
-                ((current_count++))
-                print_progress_bar "$current_count" "$ipv6_num"
-                break
-            else
-                # 第一次失败给一个明显提示（避免用户认为卡死）
-                if [ "$first_err_printed" -eq 0 ]; then
-                    first_err_printed=1
-                    echo ""
-                    echo "提示：添加IPv6失败，正在重试生成（已记录错误原因）。若持续失败将自动退出并打印原因。"
-                    echo -ne "\r"
-                fi
-                continue
-            fi
-        fi
-    done
-done
-
-echo ""
-sleep 2
-
-temp_file=$(mktemp)
-
-# 动态并发（至少 1，最多 200）
-total_jobs=${#ip_array[@]}
-quarter_jobs=$(( (total_jobs + 3) / 4 ))
-parallel_jobs=$quarter_jobs
-if [ "$parallel_jobs" -lt 1 ]; then parallel_jobs=1; fi
-if [ "$parallel_jobs" -gt 200 ]; then parallel_jobs=200; fi
-
-completed_jobs=0
-temp_progress_file=$(mktemp)
-
-echo
-echo "对$total_jobs个IPv6进行Ping测试中 请等待任务完成"
-print_progress_bar "$completed_jobs" "$total_jobs"
-
-{
-    for src_ip in "${ip_array[@]}"; do
-        (
-            ping_ipv6 "$src_ip" "$target_ipv6" "$temp_file"
-            # 只删一次，静默错误
-            $SUDO ip -6 addr del "$src_ip"/64 dev "$interface_name" 2>/dev/null || true
-            echo >> "$temp_progress_file"
-        ) &
-
-        if (( $(jobs | wc -l) >= parallel_jobs )); then
-            wait -n
-            completed_jobs=$(wc -l < "$temp_progress_file")
-            print_progress_bar "$completed_jobs" "$total_jobs"
-        fi
-    done
-    wait
-}
-
-completed_jobs=$(wc -l < "$temp_progress_file")
-print_progress_bar "$completed_jobs" "$total_jobs"
-echo ""
-
-echo "====================================================="
-echo "IPv6                                     Average"
-sort -k2 -n "$temp_file" | head -n 10 | while read -r line; do
-    ipv6=$(echo "$line" | awk '{print $1}')
-    rtt=$(echo "$line" | awk '{print $2}')
-    printf "%-40s %s ms\n" "$ipv6" "$rtt"
-done
-echo "====================================================="
-
-end_time=$(date +%s)
-elapsed_time=$((end_time - start_time))
-echo "脚本总耗时: $elapsed_time 秒。"
+echo "=================================================="
+echo "完整数据已保存至: $output_file"
