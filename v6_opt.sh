@@ -29,8 +29,12 @@ fi
 # 去除末尾的 ::，统一格式为前 4 段（例如 2607:8140:212:a29:）
 ipv6_base="${ipv6_base%::}:"
 
+# 自动获取 IPv6 默认网关（用于 NDP 主动预热）
+gateway_v6=$(ip -6 route show default dev "$interface" 2>/dev/null | awk '/via/ {print $3}' | head -n 1)
+
 echo "=========================================="
 echo "网卡: $interface | 前缀: ${ipv6_base}:/64"
+echo "网关: ${gateway_v6:-未检测到(将直连预热)}"
 echo "目标: $target_ip | 并发: $threads | 随机采样数: $test_count"
 echo "=========================================="
 
@@ -73,15 +77,24 @@ trap cleanup SIGINT SIGTERM
 do_ping() {
     local ipv6_addr="$1"
 
+    # 绑定 IP
     ip -6 addr add "${ipv6_addr}${subnet_mask}" dev "$interface" nodad 2>/dev/null
 
-    # 本地 Ping
+    # 【NDP 预热】向网关发 1 个探测包让上游交换机学习 MAC，等待 0.2 秒建立邻居缓存
+    if [ -n "$gateway_v6" ]; then
+        ping -6 -c 1 -W 0.5 -I "$ipv6_addr" "$gateway_v6" >/dev/null 2>&1
+    else
+        ping -6 -c 1 -W 0.5 -I "$ipv6_addr" "$target_ip" >/dev/null 2>&1
+    fi
+    sleep 0.2
+
+    # 本地 Ping 目标
     ping_local=$(timeout 1.5 ping -6 -I "$ipv6_addr" -c 2 -i 0.1 -W 1 "$target_ip" 2>/dev/null)
     min_delay_local=$(echo "$ping_local" | awk -F'/' '/rtt|min\/avg\/max/{print $4}' | awk '{print $NF}')
     [ -z "$min_delay_local" ] && min_delay_local="TIMEOUT"
 
-    # 远端 SSH 回 Ping
-    ping_ssh=$(timeout 2.5 ssh -o BatchMode=yes \
+    # 远端 SSH 回 Ping（放宽到 3 秒，避免远端排队误杀）
+    ping_ssh=$(timeout 3 ssh -o BatchMode=yes \
                             -o ConnectTimeout=2 \
                             -o ServerAliveInterval=1 \
                             -o ServerAliveCountMax=1 \
@@ -101,8 +114,9 @@ do_ping() {
     ip -6 addr del "${ipv6_addr}${subnet_mask}" dev "$interface" 2>/dev/null
 }
 
+# 导出函数及全局变量（包含网关）
 export -f do_ping
-export subnet_mask interface target_ip ssh_port ssh_user output_file
+export subnet_mask interface target_ip ssh_port ssh_user output_file gateway_v6
 
 # 6. 分发随机采样任务
 for ((i=1; i<=test_count; i++)); do
@@ -112,7 +126,8 @@ for ((i=1; i<=test_count; i++)); do
         random_suffix=$(get_random_v6_suffix)
         random_ipv6="${ipv6_base}${random_suffix}"
 
-        timeout 5 bash -c "do_ping '$random_ipv6'" 2>/dev/null
+        # 整体任务加装 6 秒硬超时保护
+        timeout 6 bash -c "do_ping '$random_ipv6'" 2>/dev/null
         echo >&6
     } &
 done
