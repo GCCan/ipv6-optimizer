@@ -11,7 +11,7 @@
   * **去程**：本地绑定指定 IPv6 后向目标主机发包测速。
   * **回程**：通过 SSH 调用远端主机向本地对应 IPv6 回测，精准测量真实回程延迟。
 * **高并发调度**：基于 Bash 管道令牌池实现并发控制，并支持线程级别超时强杀（避免 SSH 挂死）。
-* **自动优选**：测试完成后自动过滤超时节点，按双向综合延迟由低到高排序并输出 Top 5 地址。
+* **自动优选**：测试完成后自动过滤超时节点，当前按去程延迟由低到高排序并输出 Top 5 地址。
 * **结果导出**：数据实时加锁写入 CSV 文件，方便后续分析与持久化配置。
 
 ---
@@ -28,7 +28,7 @@
 
    # 2. 将公钥推送至目标机器
    ssh-copy-id -p <SSH端口> <用户名>@<目标IPv6>
-
+   ```
 ---
 
 ## 🚀 快速使用
@@ -36,15 +36,15 @@
 ### 1. 下载脚本并赋予执行权限
 
 ```bash
-curl -O [https://raw.githubusercontent.com/your-username/ipv6-subnet-optimizer/main/v6.sh](https://raw.githubusercontent.com/your-username/ipv6-subnet-optimizer/main/v6.sh)
-chmod +x v6.sh
+curl -O https://raw.githubusercontent.com/GCCan/ipv6-optimizer/main/v6_opt.sh
+chmod +x v6_opt.sh
 
 ```
 
 ### 2. 运行测试
 
 ```bash
-./v6.sh <目标IPv6> [SSH用户名] [SSH端口] [并发线程数]
+./v6_opt.sh <目标IPv6> [SSH用户名] [SSH端口] [并发线程数]
 
 ```
 
@@ -52,10 +52,10 @@ chmod +x v6.sh
 
 ```bash
 # 基础用法（默认 root 用户、22 端口、4 并发）
-./v6.sh 2402:4e00:c011:2700:9cb6:df2a:9aa0:1
+./v6_opt.sh 2402:4e00:c011:2700:9cb6:df2a:9aa0:1
 
 # 自定义 SSH 用户名、端口及并发数
-./v6.sh 2402:4e00:c011:2700:9cb6:df2a:9aa0:1 root 22 4
+./v6_opt.sh 2402:4e00:c011:2700:9cb6:df2a:9aa0:1 root 22 4
 
 ```
 
@@ -110,8 +110,5 @@ IPv6 地址                                | 去程延迟 (ms)    | 回程延迟
 
 ## 📄 开源许可
 
-本项目基于 [MIT License](https://www.google.com/search?q=LICENSE) 开源。
-
-```
-
+本项目基于 [MIT License](LICENSE) 开源。
 ```
